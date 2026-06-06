@@ -11,6 +11,11 @@
 #define XSTR(x)         STR(x)
 #define STR(x)          #x
 
+// ── Claude subscription usage endpoint (proxied via port 8030) ──────────────
+// Served by Aha-San's usage server on the same host as /api/usage/summary
+// Returns: { claude5h_pct, claude7d_pct, reset_at, resets_in, cached }
+#define CLAUDE_USAGE_URL    "http://" SERVER_HOST ":" XSTR(SERVER_PORT) "/api/claude/usage"
+
 // ── Deep sleep interval ──────────────────────────────────────────────────────
 #define SLEEP_MINUTES   5
 #define uS_PER_MIN      60000000ULL
@@ -29,6 +34,7 @@
 // ── Display timing ───────────────────────────────────────────────────
 #define MAIN_IDLE_MS    10000   // idle time on main before auto-cycle (10s)
 #define TIER_DWELL_MS    4000   // time per tier in cycle view (4s)
+#define CLAUDE_DWELL_MS  5000   // time on Claude subscription screen (5s)
 
 // ── Color palette (RGB888, LovyanGFX converts internally) ───────────────────
 #define C_BG            0x080808  // near-black background
@@ -45,6 +51,10 @@
 #define C_COST_OK       0x00C853  // green  < $1.00
 #define C_COST_WARN     0xFFD600  // yellow $1.00-$5.00
 #define C_COST_ALERT    0xFF3D00  // red    >= $5.00
+
+// Claude screen
+#define C_CLAUDE_BRAND  0xE5541B  // Anthropic orange
+#define C_GAUGE_BG      0x222222  // gauge track background
 
 // ── Layout geometry (landscape 240×135) ────────────────────────────────────
 #define PANEL_DIVIDER_X  114     // vertical split x

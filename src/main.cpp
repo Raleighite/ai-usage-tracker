@@ -73,6 +73,13 @@ struct WeekDay {
     int   tokens  = 0;
 };
 
+struct ClaudeUsage {
+    int  session_pct          = -1;   // -1 = unavailable
+    int  weekly_pct           = -1;
+    char session_resets_in[12] = {};
+    bool valid                = false;
+};
+
 struct UsageData {
     float     todayCost       = 0.0f;
     int       todayTokens     = 0;
@@ -97,6 +104,8 @@ void     drawTierScreen(const char *name, const TierStats &t, uint32_t color,
                         int idx, float totalCost,
                         const char *prevName, const char *nextName);
 void     runDisplayLoop(const UsageData &d);
+bool     fetchClaudeUsage(ClaudeUsage &out);
+void     drawClaudeScreen(const ClaudeUsage &c);
 void     drawError(const char *msg);
 float    readBatteryPct();
 uint32_t costColor(float cost);
@@ -498,9 +507,134 @@ void runDisplayLoop(const UsageData &d) {
             delay(50);
         }
     }
+    // ── Claude subscription screen ──
+    ClaudeUsage claude;
+    fetchClaudeUsage(claude);
+    drawClaudeScreen(claude);
+    uint32_t claudeStart = millis();
+    while (millis() - claudeStart < CLAUDE_DWELL_MS) {
+        if (digitalRead(PIN_BTN1) == LOW) {
+            uint32_t held = millis();
+            while (digitalRead(PIN_BTN1) == LOW) {
+                if (millis() - held > 2000) { ESP.restart(); }
+                delay(50);
+            }
+        }
+        if (digitalRead(PIN_BTN2) == LOW) { delay(200); break; }
+        delay(50);
+    }
+
     // Brief return to main before sleep
-    // (caller's drawSummary already on screen; just let it sit for 1s)
     delay(1000);
+}
+
+// ── Claude subscription usage: fetch + display ─────────────────────────────────
+static void printClaudeCentered(int y, const char *str) {
+    int strW = display.textWidth(str);
+    display.setCursor((LCD_HEIGHT - strW) / 2, y);
+    display.print(str);
+}
+
+bool fetchClaudeUsage(ClaudeUsage &out) {
+    HTTPClient http;
+    http.begin(CLAUDE_USAGE_URL);
+    http.setTimeout(5000);
+    int code = http.GET();
+    if (code != 200) {
+        Serial.printf("[claude] HTTP error: %d\n", code);
+        http.end();
+        return false;
+    }
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, http.getStream());
+    http.end();
+    if (err) {
+        Serial.printf("[claude] JSON parse error: %s\n", err.c_str());
+        return false;
+    }
+    // Endpoint: GET /api/claude/usage
+    // Fields: claude5h_pct, claude7d_pct, resets_in (opt), reset_at (opt)
+    out.session_pct = doc["claude5h_pct"] | -1;
+    out.weekly_pct  = doc["claude7d_pct"] | -1;
+    const char *ri  = doc["resets_in"] | "";   // human-readable e.g. "2h 14m"
+    strlcpy(out.session_resets_in, ri, sizeof(out.session_resets_in));
+    out.valid = (out.session_pct >= 0);
+    Serial.printf("[claude] session=%d%% weekly=%d%% resets=%s\n",
+                  out.session_pct, out.weekly_pct, out.session_resets_in);
+    return out.valid;
+}
+
+void drawClaudeScreen(const ClaudeUsage &c) {
+    display.fillScreen(C_BG);
+
+    // ── Header bar ──
+    display.fillRect(0, 0, LCD_HEIGHT, 26, 0x111111);
+    display.setTextColor(C_CLAUDE_BRAND);
+    display.setTextSize(3);
+    display.setCursor(8, 2);
+    display.print("CLAUDE");
+    display.setTextColor(C_DIM);
+    display.setTextSize(1);
+    display.setCursor(LCD_HEIGHT - 46, 8);
+    display.print("PLAN USAGE");
+    display.fillRect(0, 26, LCD_HEIGHT, 2, C_DIVIDER);
+
+    if (!c.valid) {
+        display.setTextColor(TFT_RED);
+        display.setTextSize(2);
+        printClaudeCentered(54, "UNAVAILABLE");
+        display.setTextColor(C_DIM);
+        display.setTextSize(1);
+        printClaudeCentered(80, "Start claude-usage-server");
+        printClaudeCentered(92, "on your MacBook");
+        return;
+    }
+
+    // ── 5-hour session block ──
+    display.setTextColor(C_DIM);
+    display.setTextSize(1);
+    printClaudeCentered(32, "5-HOUR SESSION");
+
+    char sessionStr[8];
+    snprintf(sessionStr, sizeof(sessionStr), "%d%%", c.session_pct);
+    uint32_t sessColor = (c.session_pct >= 80) ? C_COST_ALERT :
+                         (c.session_pct >= 50) ? C_COST_WARN  : C_CLAUDE_BRAND;
+    display.setTextColor(sessColor);
+    display.setTextSize(4);
+    printClaudeCentered(42, sessionStr);
+
+    // Session gauge bar
+    const int gX = 16, gW = LCD_HEIGHT - 32, gY = 84, gH = 8;
+    display.fillRect(gX, gY, gW, gH, C_GAUGE_BG);
+    int fill = (int)(gW * constrain(c.session_pct, 0, 100) / 100.0f);
+    if (fill > 0) display.fillRect(gX, gY, fill, gH, sessColor);
+
+    if (c.session_resets_in[0]) {
+        char resetStr[24];
+        snprintf(resetStr, sizeof(resetStr), "resets in %s", c.session_resets_in);
+        display.setTextColor(C_DIM);
+        display.setTextSize(1);
+        printClaudeCentered(96, resetStr);
+    }
+
+    // ── Weekly block ──
+    display.fillRect(8, 107, LCD_HEIGHT - 16, 1, C_DIVIDER);
+    display.setTextColor(C_DIM);
+    display.setTextSize(1);
+    display.setCursor(8, 111);
+    display.print("7-DAY");
+    char weeklyStr[8];
+    snprintf(weeklyStr, sizeof(weeklyStr), "%d%%", c.weekly_pct);
+    display.setTextColor(C_FG);
+    display.setTextSize(2);
+    display.setCursor(52, 108);
+    display.print(weeklyStr);
+
+    // Weekly mini-gauge
+    const int wX = 104, wW = LCD_HEIGHT - 112, wY = 115, wH = 5;
+    display.fillRect(wX, wY, wW, wH, C_GAUGE_BG);
+    int wfill = (int)(wW * constrain(c.weekly_pct, 0, 100) / 100.0f);
+    if (wfill > 0) display.fillRect(wX, wY, wfill, wH, C_FG);
 }
 
 void drawError(const char *msg) {
