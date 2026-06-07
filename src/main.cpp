@@ -567,74 +567,56 @@ bool fetchClaudeUsage(ClaudeUsage &out) {
 void drawClaudeScreen(const ClaudeUsage &c) {
     display.fillScreen(C_BG);
 
-    // ── Header bar ──
-    display.fillRect(0, 0, LCD_HEIGHT, 26, 0x111111);
-    display.setTextColor(C_CLAUDE_BRAND);
-    display.setTextSize(3);
-    display.setCursor(8, 2);
-    display.print("CLAUDE");
-    display.setTextColor(C_DIM);
-    display.setTextSize(1);
-    display.setCursor(LCD_HEIGHT - 46, 8);
-    display.print("PLAN USAGE");
-    display.fillRect(0, 26, LCD_HEIGHT, 2, C_DIVIDER);
-
     if (!c.valid) {
         display.setTextColor(TFT_RED);
         display.setTextSize(2);
         printClaudeCentered(54, "UNAVAILABLE");
         display.setTextColor(C_DIM);
         display.setTextSize(1);
-        printClaudeCentered(80, "Start claude-usage-server");
-        printClaudeCentered(92, "on your MacBook");
+        printClaudeCentered(85, "claude-usage-server offline");
         return;
     }
 
-    // ── 5-hour session block ──
+    // Bar color scales with urgency
+    uint32_t barColor = (c.session_pct >= 80) ? C_COST_ALERT :
+                        (c.session_pct >= 50) ? C_COST_WARN  : C_CLAUDE_BRAND;
+
+    // ── Label ──
     display.setTextColor(C_DIM);
     display.setTextSize(1);
-    printClaudeCentered(32, "5-HOUR SESSION");
+    printClaudeCentered(4, "CLAUDE  5-HOUR  SESSION");
 
-    char sessionStr[8];
-    snprintf(sessionStr, sizeof(sessionStr), "%d%%", c.session_pct);
-    uint32_t sessColor = (c.session_pct >= 80) ? C_COST_ALERT :
-                         (c.session_pct >= 50) ? C_COST_WARN  : C_CLAUDE_BRAND;
-    display.setTextColor(sessColor);
-    display.setTextSize(4);
-    printClaudeCentered(42, sessionStr);
+    // ── Fat bar gauge spanning the screen (Y=14..Y=64, 50px tall) ──
+    const int barX = 4, barY = 14, barW = LCD_HEIGHT - 8, barH = 50;
+    display.fillRect(barX, barY, barW, barH, C_GAUGE_BG);
+    int fill = (int)(barW * constrain(c.session_pct, 0, 100) / 100.0f);
+    if (fill > 0) display.fillRect(barX, barY, fill, barH, barColor);
 
-    // Session gauge bar
-    const int gX = 16, gW = LCD_HEIGHT - 32, gY = 84, gH = 8;
-    display.fillRect(gX, gY, gW, gH, C_GAUGE_BG);
-    int fill = (int)(gW * constrain(c.session_pct, 0, 100) / 100.0f);
-    if (fill > 0) display.fillRect(gX, gY, fill, gH, sessColor);
-
-    if (c.session_resets_in[0]) {
-        char resetStr[24];
-        snprintf(resetStr, sizeof(resetStr), "resets in %s", c.session_resets_in);
-        display.setTextColor(C_DIM);
-        display.setTextSize(1);
-        printClaudeCentered(96, resetStr);
-    }
-
-    // ── Weekly block ──
-    display.fillRect(8, 107, LCD_HEIGHT - 16, 1, C_DIVIDER);
-    display.setTextColor(C_DIM);
-    display.setTextSize(1);
-    display.setCursor(8, 111);
-    display.print("7-DAY");
-    char weeklyStr[8];
-    snprintf(weeklyStr, sizeof(weeklyStr), "%d%%", c.weekly_pct);
+    // % overlaid on bar, centered
+    char pctStr[8];
+    snprintf(pctStr, sizeof(pctStr), "%d%%", c.session_pct);
     display.setTextColor(C_FG);
-    display.setTextSize(2);
-    display.setCursor(52, 108);
-    display.print(weeklyStr);
+    display.setTextSize(3);
+    int pctW = display.textWidth(pctStr);
+    display.setCursor((LCD_HEIGHT - pctW) / 2, barY + (barH - 24) / 2);
+    display.print(pctStr);
 
-    // Weekly mini-gauge
-    const int wX = 104, wW = LCD_HEIGHT - 112, wY = 115, wH = 5;
-    display.fillRect(wX, wY, wW, wH, C_GAUGE_BG);
-    int wfill = (int)(wW * constrain(c.weekly_pct, 0, 100) / 100.0f);
-    if (wfill > 0) display.fillRect(wX, wY, wfill, wH, C_FG);
+    // ── Divider ──
+    display.fillRect(0, 68, LCD_HEIGHT, 2, C_DIVIDER);
+
+    // ── Countdown hero ──
+    display.setTextColor(C_DIM);
+    display.setTextSize(1);
+    printClaudeCentered(74, "RESETS IN");
+
+    display.setTextColor(C_FG);
+    if (c.session_resets_in[0]) {
+        display.setTextSize(4);
+        printClaudeCentered(84, c.session_resets_in);
+    } else {
+        display.setTextSize(2);
+        printClaudeCentered(90, "--");
+    }
 }
 
 void drawError(const char *msg) {
