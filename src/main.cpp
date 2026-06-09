@@ -119,7 +119,7 @@ void     drawSummary(const UsageData &d, float batPct);
 void     drawTierScreen(const char *name, const TierStats &t, uint32_t color,
                         int idx, float totalCost,
                         const char *prevName, const char *nextName);
-void     runDisplayLoop(const UsageData &d, const ClaudeUsage &claude, const CodexUsage &codex);
+void     runDisplayLoop(const ClaudeUsage &claude, const CodexUsage &codex);
 bool     fetchClaudeUsage(ClaudeUsage &out);
 void     drawClaudeScreen(const ClaudeUsage &c);
 void     holdClaudeScreen();
@@ -176,8 +176,7 @@ void setup() {
         return;
     }
 
-    drawSummary(usage, readBatteryPct());
-    runDisplayLoop(usage, claude, codex);
+    runDisplayLoop(claude, codex);
     goSleep();
 }
 
@@ -490,54 +489,11 @@ void drawTierScreen(const char *name, const TierStats &t, uint32_t color,
     printCentered(0, LCD_HEIGHT, 125, "hold IO14 to advance");
 }
 
-// ── Display loop: idle on main, then auto-cycle tiers ──────────────────────
-void runDisplayLoop(const UsageData &d, const ClaudeUsage &claude, const CodexUsage &codex) {
+// ── Display loop: Claude quota, then Codex usage. No spend/cost screens. ────
+void runDisplayLoop(const ClaudeUsage &claude, const CodexUsage &codex) {
     pinMode(PIN_BTN1, INPUT_PULLUP);  // IO0 — has internal pullup
     pinMode(PIN_BTN2, INPUT);          // GPIO35 — input-only, external pullup on PCB
 
-    const char    *tierNames[]  = { "SONNET", "HAIKU", "OPUS", "OTHER" };
-    const TierStats *tiers[]    = { &d.sonnet, &d.haiku, &d.opus, &d.other };
-    const uint32_t  tierColors[]= { C_TIER_SONNET, C_TIER_HAIKU,
-                                    C_TIER_OPUS,   C_TIER_OTHER };
-
-    // Wait on main screen for MAIN_IDLE_MS (10s) or IO14 press
-    uint32_t idleStart = millis();
-    while (millis() - idleStart < MAIN_IDLE_MS) {
-        // IO0 long-press: manual refresh
-        if (digitalRead(PIN_BTN1) == LOW) {
-            uint32_t held = millis();
-            while (digitalRead(PIN_BTN1) == LOW) {
-                if (millis() - held > 2000) { ESP.restart(); }
-                delay(50);
-            }
-        }
-        // IO14 press: jump to cycle immediately
-        if (digitalRead(PIN_BTN2) == LOW) break;
-        delay(50);
-    }
-
-    // Fleet total for share bar
-    float fleetTotal = d.todayCost > 0.0f ? d.todayCost : 1.0f;
-
-    // Cycle through all 4 tiers
-    for (int i = 0; i < 4; i++) {
-        const char *prev = (i > 0)     ? tierNames[i - 1] : nullptr;
-        const char *next = (i < 3)     ? tierNames[i + 1] : nullptr;
-        drawTierScreen(tierNames[i], *tiers[i], tierColors[i],
-                       i, fleetTotal, prev, next);
-        uint32_t dwellStart = millis();
-        while (millis() - dwellStart < TIER_DWELL_MS) {
-            if (digitalRead(PIN_BTN1) == LOW) {
-                uint32_t held = millis();
-                while (digitalRead(PIN_BTN1) == LOW) {
-                    if (millis() - held > 2000) { ESP.restart(); }
-                    delay(50);
-                }
-            }
-            if (digitalRead(PIN_BTN2) == LOW) { delay(200); break; }  // advance
-            delay(50);
-        }
-    }
     drawClaudeScreen(claude);
     uint32_t claudeStart = millis();
     while (millis() - claudeStart < CLAUDE_DWELL_MS) {
