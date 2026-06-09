@@ -75,8 +75,11 @@ struct WeekDay {
 
 struct ClaudeUsage {
     int  session_pct          = -1;   // -1 = unavailable
-    int  weekly_pct           = -1;
-    char session_resets_in[12] = {};
+    int  sonnet_weekly_pct    = -1;
+    int  total_weekly_pct     = -1;
+    char session_resets_in[12]       = {};
+    char sonnet_weekly_resets_in[12] = {};
+    char total_weekly_resets_in[12]  = {};
     bool valid                = false;
 };
 
@@ -106,6 +109,7 @@ void     drawTierScreen(const char *name, const TierStats &t, uint32_t color,
 void     runDisplayLoop(const UsageData &d);
 bool     fetchClaudeUsage(ClaudeUsage &out);
 void     drawClaudeScreen(const ClaudeUsage &c);
+void     holdClaudeScreen();
 void     drawError(const char *msg);
 float    readBatteryPct();
 uint32_t costColor(float cost);
@@ -130,23 +134,21 @@ void setup() {
 
     drawBoot();  // 2.5s animated boot screen
 
-    float batPct = readBatteryPct();
-
     if (!connectWifi()) {
         drawError("WiFi failed");
         goSleep();
         return;
     }
 
-    UsageData data;
-    if (!fetchUsage(data)) {
-        drawError("Fetch failed");
+    ClaudeUsage claude;
+    if (!fetchClaudeUsage(claude)) {
+        drawError("Claude failed");
         goSleep();
         return;
     }
 
-    drawSummary(data, batPct);
-    runDisplayLoop(data);
+    drawClaudeScreen(claude);
+    holdClaudeScreen();
     goSleep();
 }
 
@@ -553,15 +555,64 @@ bool fetchClaudeUsage(ClaudeUsage &out) {
         return false;
     }
     // Endpoint: GET /api/claude/usage
-    // Fields: claude5h_pct, claude7d_pct, resets_in (opt), reset_at (opt)
-    out.session_pct = doc["claude5h_pct"] | -1;
-    out.weekly_pct  = doc["claude7d_pct"] | -1;
-    const char *ri  = doc["resets_in"] | "";   // human-readable e.g. "2h 14m"
-    strlcpy(out.session_resets_in, ri, sizeof(out.session_resets_in));
+    // Fields used: session, Sonnet 7-day, and total 7-day utilization + reset countdowns.
+    out.session_pct       = doc["claude5h_pct"] | -1;
+    out.sonnet_weekly_pct = doc["sonnet7d_pct"] | -1;
+    out.total_weekly_pct  = doc["total7d_pct"]  | (doc["claude7d_pct"] | -1);
+
+    const char *sessionReset = doc["resets_in"] | "";
+    const char *sonnetReset  = doc["sonnet7d_resets_in"] | "";
+    const char *totalReset   = doc["total7d_resets_in"]  | "";
+    strlcpy(out.session_resets_in, sessionReset, sizeof(out.session_resets_in));
+    strlcpy(out.sonnet_weekly_resets_in, sonnetReset, sizeof(out.sonnet_weekly_resets_in));
+    strlcpy(out.total_weekly_resets_in, totalReset, sizeof(out.total_weekly_resets_in));
     out.valid = (out.session_pct >= 0);
-    Serial.printf("[claude] session=%d%% weekly=%d%% resets=%s\n",
-                  out.session_pct, out.weekly_pct, out.session_resets_in);
+    Serial.printf("[claude] session=%d%% reset=%s sonnet7d=%d%% reset=%s total7d=%d%% reset=%s\n",
+                  out.session_pct, out.session_resets_in,
+                  out.sonnet_weekly_pct, out.sonnet_weekly_resets_in,
+                  out.total_weekly_pct, out.total_weekly_resets_in);
     return out.valid;
+}
+
+static uint32_t quotaColor(int pct) {
+    if (pct >= 90) return C_COST_ALERT;
+    if (pct >= 70) return C_COST_WARN;
+    return C_CLAUDE_BRAND;
+}
+
+static void drawQuotaRow(int y, const char *label, int pct, const char *resetText) {
+    const int x = 8;
+    const int w = LCD_HEIGHT - 16;
+    const int barY = y + 24;
+    const int barH = 10;
+
+    display.setTextSize(1);
+    display.setTextColor(C_DIM);
+    display.setCursor(x, y);
+    display.print(label);
+
+    char pctStr[8];
+    if (pct >= 0) snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+    else strlcpy(pctStr, "--", sizeof(pctStr));
+
+    display.setTextSize(2);
+    display.setTextColor(C_FG);
+    int pctW = display.textWidth(pctStr);
+    display.setCursor(x, y + 10);
+    display.print(pctStr);
+
+    display.setTextSize(1);
+    display.setTextColor(C_DIM);
+    const char *reset = resetText && resetText[0] ? resetText : "--";
+    char resetStr[24];
+    snprintf(resetStr, sizeof(resetStr), "reset %s", reset);
+    int resetW = display.textWidth(resetStr);
+    display.setCursor(LCD_HEIGHT - x - resetW, y + 15);
+    display.print(resetStr);
+
+    display.fillRect(x, barY, w, barH, C_GAUGE_BG);
+    int fill = (pct >= 0) ? (int)(w * constrain(pct, 0, 100) / 100.0f) : 0;
+    if (fill > 0) display.fillRect(x, barY, fill, barH, quotaColor(pct));
 }
 
 void drawClaudeScreen(const ClaudeUsage &c) {
@@ -577,45 +628,26 @@ void drawClaudeScreen(const ClaudeUsage &c) {
         return;
     }
 
-    // Bar color scales with urgency
-    uint32_t barColor = (c.session_pct >= 80) ? C_COST_ALERT :
-                        (c.session_pct >= 50) ? C_COST_WARN  : C_CLAUDE_BRAND;
+    drawQuotaRow(4,  "SESSION",    c.session_pct,       c.session_resets_in);
+    drawQuotaRow(48, "SONNET 7D",  c.sonnet_weekly_pct, c.sonnet_weekly_resets_in);
+    drawQuotaRow(92, "TOTAL 7D",   c.total_weekly_pct,  c.total_weekly_resets_in);
+}
 
-    // ── Label ──
-    display.setTextColor(C_DIM);
-    display.setTextSize(1);
-    printClaudeCentered(4, "CLAUDE  5-HOUR  SESSION");
+void holdClaudeScreen() {
+    pinMode(PIN_BTN1, INPUT_PULLUP);
+    pinMode(PIN_BTN2, INPUT);
 
-    // ── Fat bar gauge spanning the screen (Y=14..Y=64, 50px tall) ──
-    const int barX = 4, barY = 14, barW = LCD_HEIGHT - 8, barH = 50;
-    display.fillRect(barX, barY, barW, barH, C_GAUGE_BG);
-    int fill = (int)(barW * constrain(c.session_pct, 0, 100) / 100.0f);
-    if (fill > 0) display.fillRect(barX, barY, fill, barH, barColor);
-
-    // % overlaid on bar, centered
-    char pctStr[8];
-    snprintf(pctStr, sizeof(pctStr), "%d%%", c.session_pct);
-    display.setTextColor(C_FG);
-    display.setTextSize(3);
-    int pctW = display.textWidth(pctStr);
-    display.setCursor((LCD_HEIGHT - pctW) / 2, barY + (barH - 24) / 2);
-    display.print(pctStr);
-
-    // ── Divider ──
-    display.fillRect(0, 68, LCD_HEIGHT, 2, C_DIVIDER);
-
-    // ── Countdown hero ──
-    display.setTextColor(C_DIM);
-    display.setTextSize(1);
-    printClaudeCentered(74, "RESETS IN");
-
-    display.setTextColor(C_FG);
-    if (c.session_resets_in[0]) {
-        display.setTextSize(4);
-        printClaudeCentered(84, c.session_resets_in);
-    } else {
-        display.setTextSize(2);
-        printClaudeCentered(90, "--");
+    uint32_t start = millis();
+    while (millis() - start < CLAUDE_DWELL_MS) {
+        if (digitalRead(PIN_BTN1) == LOW) {
+            uint32_t held = millis();
+            while (digitalRead(PIN_BTN1) == LOW) {
+                if (millis() - held > 2000) { ESP.restart(); }
+                delay(50);
+            }
+        }
+        if (digitalRead(PIN_BTN2) == LOW) { ESP.restart(); }
+        delay(50);
     }
 }
 
