@@ -3,7 +3,7 @@
  * Hardware: LILYGO T-Display-S3
  * Endpoint: GET http://192.168.0.203:8030/api/usage
  *
- * Build with PlatformIO: pio run -t upload
+ * Build with PlatformIO: python3 -m platformio run -e t_display
  */
 
 #include <Arduino.h>
@@ -108,7 +108,7 @@ struct UsageData {
     bool      valid           = false;
 };
 
-// ── Persistent across sleep cycles (RTC memory) ──────────────────────────────
+// ── Persistent across restarts ────────────────────────────────────────────────
 RTC_DATA_ATTR int bootCount = 0;
 
 // ── Forward declarations ──────────────────────────────────────────────────────
@@ -128,8 +128,7 @@ void     drawCodexScreen(const CodexUsage &c);
 void     drawError(const char *msg);
 float    readBatteryPct();
 uint32_t costColor(float cost);
-bool     checkManualRefresh();  // long-press IO0 skips sleep
-void     goSleep();
+bool     checkManualRefresh();  // long-press IO0 restarts the device
 
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
@@ -151,37 +150,40 @@ void setup() {
 
     if (!connectWifi()) {
         drawError("WiFi failed");
-        goSleep();
+        delay(ERROR_RETRY_MS);
+        ESP.restart();
+    }
+}
+
+void loop() {
+    if (WiFi.status() != WL_CONNECTED && !connectWifi()) {
+        drawError("WiFi failed");
+        delay(ERROR_RETRY_MS);
         return;
     }
 
     UsageData usage;
     if (!fetchUsage(usage)) {
         drawError("Summary failed");
-        goSleep();
+        delay(ERROR_RETRY_MS);
         return;
     }
 
     ClaudeUsage claude;
     if (!fetchClaudeUsage(claude)) {
         drawError("Claude failed");
-        goSleep();
+        delay(ERROR_RETRY_MS);
         return;
     }
 
     CodexUsage codex;
     if (!fetchCodexUsage(codex)) {
         drawError("Codex failed");
-        goSleep();
+        delay(ERROR_RETRY_MS);
         return;
     }
 
     runDisplayLoop(claude, codex);
-    goSleep();
-}
-
-void loop() {
-    // Nothing — we use deep sleep; loop never runs
 }
 
 // ── WiFi ──────────────────────────────────────────────────────────────────────
@@ -522,8 +524,7 @@ void runDisplayLoop(const ClaudeUsage &claude, const CodexUsage &codex) {
         delay(50);
     }
 
-    // Brief return to main before sleep
-    delay(1000);
+    // Next loop refreshes all endpoints and draws the updated values.
 }
 
 // ── Claude subscription usage: fetch + display ─────────────────────────────────
@@ -782,7 +783,7 @@ uint32_t costColor(float cost) {
     return C_COST_OK;
 }
 
-// ── Deep sleep ────────────────────────────────────────────────────────────────
+// ── Manual refresh / restart ─────────────────────────────────────────────────
 bool checkManualRefresh() {
     pinMode(PIN_BTN1, INPUT_PULLUP);
     if (digitalRead(PIN_BTN1) != LOW) return false;
@@ -801,16 +802,4 @@ bool checkManualRefresh() {
         delay(50);
     }
     return false;
-}
-
-void goSleep() {
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    display.setBrightness(0);
-    if (PIN_POWER_ON >= 0) digitalWrite(PIN_POWER_ON, LOW);
-
-    esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * uS_PER_MIN);
-    Serial.printf("[sleep] going down for %d min\n", SLEEP_MINUTES);
-    Serial.flush();
-    esp_deep_sleep_start();
 }
