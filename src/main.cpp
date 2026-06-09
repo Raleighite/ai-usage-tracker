@@ -83,6 +83,19 @@ struct ClaudeUsage {
     bool valid                = false;
 };
 
+struct CodexUsage {
+    int  turns_5h     = 0;
+    int  sessions_5h  = 0;
+    int  tokens_5h    = 0;
+    int  turns_24h    = 0;
+    int  sessions_24h = 0;
+    int  tokens_24h   = 0;
+    int  turns_7d     = 0;
+    int  sessions_7d  = 0;
+    int  tokens_7d    = 0;
+    bool valid         = false;
+};
+
 struct UsageData {
     float     todayCost       = 0.0f;
     int       todayTokens     = 0;
@@ -106,10 +119,12 @@ void     drawSummary(const UsageData &d, float batPct);
 void     drawTierScreen(const char *name, const TierStats &t, uint32_t color,
                         int idx, float totalCost,
                         const char *prevName, const char *nextName);
-void     runDisplayLoop(const UsageData &d);
+void     runDisplayLoop(const UsageData &d, const ClaudeUsage &claude, const CodexUsage &codex);
 bool     fetchClaudeUsage(ClaudeUsage &out);
 void     drawClaudeScreen(const ClaudeUsage &c);
 void     holdClaudeScreen();
+bool     fetchCodexUsage(CodexUsage &out);
+void     drawCodexScreen(const CodexUsage &c);
 void     drawError(const char *msg);
 float    readBatteryPct();
 uint32_t costColor(float cost);
@@ -140,6 +155,13 @@ void setup() {
         return;
     }
 
+    UsageData usage;
+    if (!fetchUsage(usage)) {
+        drawError("Summary failed");
+        goSleep();
+        return;
+    }
+
     ClaudeUsage claude;
     if (!fetchClaudeUsage(claude)) {
         drawError("Claude failed");
@@ -147,8 +169,15 @@ void setup() {
         return;
     }
 
-    drawClaudeScreen(claude);
-    holdClaudeScreen();
+    CodexUsage codex;
+    if (!fetchCodexUsage(codex)) {
+        drawError("Codex failed");
+        goSleep();
+        return;
+    }
+
+    drawSummary(usage, readBatteryPct());
+    runDisplayLoop(usage, claude, codex);
     goSleep();
 }
 
@@ -462,7 +491,7 @@ void drawTierScreen(const char *name, const TierStats &t, uint32_t color,
 }
 
 // ── Display loop: idle on main, then auto-cycle tiers ──────────────────────
-void runDisplayLoop(const UsageData &d) {
+void runDisplayLoop(const UsageData &d, const ClaudeUsage &claude, const CodexUsage &codex) {
     pinMode(PIN_BTN1, INPUT_PULLUP);  // IO0 — has internal pullup
     pinMode(PIN_BTN2, INPUT);          // GPIO35 — input-only, external pullup on PCB
 
@@ -509,12 +538,23 @@ void runDisplayLoop(const UsageData &d) {
             delay(50);
         }
     }
-    // ── Claude subscription screen ──
-    ClaudeUsage claude;
-    fetchClaudeUsage(claude);
     drawClaudeScreen(claude);
     uint32_t claudeStart = millis();
     while (millis() - claudeStart < CLAUDE_DWELL_MS) {
+        if (digitalRead(PIN_BTN1) == LOW) {
+            uint32_t held = millis();
+            while (digitalRead(PIN_BTN1) == LOW) {
+                if (millis() - held > 2000) { ESP.restart(); }
+                delay(50);
+            }
+        }
+        if (digitalRead(PIN_BTN2) == LOW) { delay(200); break; }
+        delay(50);
+    }
+
+    drawCodexScreen(codex);
+    uint32_t codexStart = millis();
+    while (millis() - codexStart < CODEX_DWELL_MS) {
         if (digitalRead(PIN_BTN1) == LOW) {
             uint32_t held = millis();
             while (digitalRead(PIN_BTN1) == LOW) {
@@ -649,6 +689,99 @@ void holdClaudeScreen() {
         if (digitalRead(PIN_BTN2) == LOW) { ESP.restart(); }
         delay(50);
     }
+}
+
+// ── Codex local session usage: fetch + display ───────────────────────────────
+bool fetchCodexUsage(CodexUsage &out) {
+    HTTPClient http;
+    http.begin(CODEX_USAGE_URL);
+    http.setTimeout(5000);
+    int code = http.GET();
+    if (code != 200) {
+        Serial.printf("[codex] HTTP error: %d\n", code);
+        http.end();
+        return false;
+    }
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, http.getStream());
+    http.end();
+    if (err) {
+        Serial.printf("[codex] JSON parse error: %s\n", err.c_str());
+        return false;
+    }
+
+    out.turns_5h     = doc["codex5h_turns"]     | 0;
+    out.sessions_5h  = doc["codex5h_sessions"]  | 0;
+    out.tokens_5h    = doc["codex5h_tokens"]    | 0;
+    out.turns_24h    = doc["codex24h_turns"]    | 0;
+    out.sessions_24h = doc["codex24h_sessions"] | 0;
+    out.tokens_24h   = doc["codex24h_tokens"]   | 0;
+    out.turns_7d     = doc["codex7d_turns"]     | 0;
+    out.sessions_7d  = doc["codex7d_sessions"]  | 0;
+    out.tokens_7d    = doc["codex7d_tokens"]    | 0;
+    out.valid        = true;
+
+    Serial.printf("[codex] 5h=%d turns/%d sessions/%d tokens 24h=%d/%d/%d 7d=%d/%d/%d\n",
+                  out.turns_5h, out.sessions_5h, out.tokens_5h,
+                  out.turns_24h, out.sessions_24h, out.tokens_24h,
+                  out.turns_7d, out.sessions_7d, out.tokens_7d);
+    return true;
+}
+
+static void formatTokenCount(int tokens, char *buf, size_t len) {
+    if (tokens >= 1000000) snprintf(buf, len, "%.1fM", tokens / 1000000.0f);
+    else if (tokens >= 1000) snprintf(buf, len, "%.1fK", tokens / 1000.0f);
+    else snprintf(buf, len, "%d", tokens);
+}
+
+static void drawCodexRow(int y, const char *label, int turns, int sessions, int tokens, int maxTokens) {
+    const int x = 8;
+    const int w = LCD_HEIGHT - 16;
+    const int barY = y + 26;
+    const int barH = 8;
+
+    display.setTextSize(1);
+    display.setTextColor(C_DIM);
+    display.setCursor(x, y);
+    display.print(label);
+
+    char tokenStr[12];
+    formatTokenCount(tokens, tokenStr, sizeof(tokenStr));
+    display.setTextSize(2);
+    display.setTextColor(C_FG);
+    display.setCursor(x, y + 10);
+    display.print(tokenStr);
+
+    char meta[24];
+    snprintf(meta, sizeof(meta), "%dt %ds", turns, sessions);
+    display.setTextSize(1);
+    display.setTextColor(C_DIM);
+    int metaW = display.textWidth(meta);
+    display.setCursor(LCD_HEIGHT - x - metaW, y + 15);
+    display.print(meta);
+
+    display.fillRect(x, barY, w, barH, C_GAUGE_BG);
+    int fill = maxTokens > 0 ? (int)(w * constrain(tokens / (float)maxTokens, 0.0f, 1.0f)) : 0;
+    if (fill > 0) display.fillRect(x, barY, fill, barH, C_CODEX_BRAND);
+}
+
+void drawCodexScreen(const CodexUsage &c) {
+    display.fillScreen(C_BG);
+
+    if (!c.valid) {
+        display.setTextColor(TFT_RED);
+        display.setTextSize(2);
+        printClaudeCentered(54, "UNAVAILABLE");
+        display.setTextColor(C_DIM);
+        display.setTextSize(1);
+        printClaudeCentered(85, "codex-usage-server offline");
+        return;
+    }
+
+    int maxTokens = max(c.tokens_5h, max(c.tokens_24h, c.tokens_7d));
+    drawCodexRow(4,  "CODEX 5H",  c.turns_5h,  c.sessions_5h,  c.tokens_5h,  maxTokens);
+    drawCodexRow(48, "CODEX 24H", c.turns_24h, c.sessions_24h, c.tokens_24h, maxTokens);
+    drawCodexRow(92, "CODEX 7D",  c.turns_7d,  c.sessions_7d,  c.tokens_7d,  maxTokens);
 }
 
 void drawError(const char *msg) {

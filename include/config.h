@@ -16,6 +16,10 @@
 // Returns session, Sonnet 7-day, and total 7-day quota percentages + reset countdowns
 #define CLAUDE_USAGE_URL    "http://" SERVER_HOST ":" XSTR(SERVER_PORT) "/api/claude/usage"
 
+// ── ChatGPT Codex session usage endpoint ───────────────────────────────────
+// Returns local OpenClaw Codex turn/session/token rollups from trajectory telemetry
+#define CODEX_USAGE_URL     "http://" SERVER_HOST ":" XSTR(SERVER_PORT) "/api/codex/usage"
+
 // ── Deep sleep interval ──────────────────────────────────────────────────────
 #define SLEEP_MINUTES   5
 #define uS_PER_MIN      60000000ULL
@@ -35,6 +39,7 @@
 #define MAIN_IDLE_MS    10000   // idle time on main before auto-cycle (10s)
 #define TIER_DWELL_MS    4000   // time per tier in cycle view (4s)
 #define CLAUDE_DWELL_MS 30000   // time on Claude quota screen (30s)
+#define CODEX_DWELL_MS  15000   // time on Codex usage screen (15s)
 
 // ── Color palette (RGB888, LovyanGFX converts internally) ───────────────────
 #define C_BG            0x080808  // near-black background
@@ -55,6 +60,7 @@
 // Claude screen
 #define C_CLAUDE_BRAND  0xE5541B  // Anthropic orange
 #define C_GAUGE_BG      0x222222  // gauge track background
+#define C_CODEX_BRAND   0x10A37F  // OpenAI green
 
 // ── Layout geometry (landscape 240×135) ────────────────────────────────────
 #define PANEL_DIVIDER_X  114     // vertical split x
