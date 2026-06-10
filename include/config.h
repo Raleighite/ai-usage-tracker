@@ -4,6 +4,10 @@
 #define WIFI_SSID       "YOUR_SSID"
 #define WIFI_PASSWORD   "YOUR_PASSWORD"
 
+// ── BLE Provisioning ─────────────────────────────────────────────────────────
+#define BLE_DEVICE_NAME     "AI-USAGE-TRACKER"
+#define BLE_POP_PIN         "0000"
+
 // ── Agent HQ endpoint ────────────────────────────────────────────────────────
 #define SERVER_HOST     "192.168.0.203"
 #define SERVER_PORT     8030

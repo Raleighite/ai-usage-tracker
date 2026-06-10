@@ -10,6 +10,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <WiFiProv.h>
 #include <LovyanGFX.hpp>
 #include "config.h"
 
@@ -112,6 +113,8 @@ struct UsageData {
 
 // ── Persistent across restarts ────────────────────────────────────────────────
 RTC_DATA_ATTR int bootCount = 0;
+static volatile bool g_wifiReady = false;
+static volatile bool g_provError = false;
 
 // ── Forward declarations ──────────────────────────────────────────────────────
 bool     connectWifi();
@@ -132,6 +135,8 @@ void     drawError(const char *msg);
 float    readBatteryPct();
 uint32_t costColor(float cost);
 bool     checkManualRefresh();  // long-press IO0 restarts the device
+void     drawProvisioningScreen(const char *status = "Advertising over BLE...");
+void     SysProvEvent(arduino_event_t *sys_event);
 
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
@@ -151,10 +156,45 @@ void setup() {
 
     drawBoot();  // 2.5s animated boot screen
 
-    if (!connectWifi()) {
-        drawError("WiFi failed");
-        delay(ERROR_RETRY_MS);
-        ESP.restart();
+    // Hold BOOT button during boot = force re-provisioning (clears saved WiFi creds)
+    pinMode(PIN_BTN1, INPUT_PULLUP);
+    bool forceReprovision = (digitalRead(PIN_BTN1) == LOW);
+    if (forceReprovision) Serial.println("[prov] BOOT held — re-provisioning");
+
+    // Start BLE provisioning (non-blocking).
+    // Already provisioned: connects silently in <3s.
+    // First boot or forced: advertises over BLE; open ESP BLE Provisioning app.
+    WiFi.onEvent(SysProvEvent);
+    WiFiProv.beginProvision(
+        WIFI_PROV_SCHEME_BLE,
+        WIFI_PROV_SCHEME_HANDLER_FREE_BTDM,
+        WIFI_PROV_SECURITY_1,
+        BLE_POP_PIN,
+        BLE_DEVICE_NAME,
+        nullptr, nullptr,
+        forceReprovision
+    );
+
+    // Wait for connection; show provisioning screen if BLE advertising kicked in
+    {
+        uint32_t t0 = millis();
+        bool provScreen = false;
+        while (WiFi.status() != WL_CONNECTED) {
+            if (g_provError) {
+                drawError("WiFi auth failed");
+                delay(ERROR_RETRY_MS);
+                ESP.restart();
+            }
+            if (!provScreen && millis() - t0 > 2000) {
+                drawProvisioningScreen();
+                provScreen = true;
+            }
+            delay(100);
+        }
+        if (provScreen) {
+            drawProvisioningScreen("Connected!");
+            delay(800);
+        }
     }
 }
 
@@ -187,10 +227,83 @@ void loop() {
     runDisplayLoop(claude, codex);
 }
 
+// ── BLE Provisioning ───────────────────────────────────────────────────────────
+void SysProvEvent(arduino_event_t *sys_event) {
+    switch (sys_event->event_id) {
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            g_wifiReady = true;
+            Serial.printf("[prov] WiFi connected: %s\n",
+                          WiFi.localIP().toString().c_str());
+            break;
+        case ARDUINO_EVENT_PROV_START:
+            Serial.println("[prov] BLE advertising");
+            break;
+        case ARDUINO_EVENT_PROV_CRED_RECV:
+            Serial.println("[prov] Credentials received from app");
+            break;
+        case ARDUINO_EVENT_PROV_CRED_FAIL:
+            Serial.println("[prov] Credential validation failed");
+            g_provError = true;
+            break;
+        case ARDUINO_EVENT_PROV_CRED_SUCCESS:
+            Serial.println("[prov] Credentials saved to NVS");
+            break;
+        case ARDUINO_EVENT_PROV_END:
+            Serial.println("[prov] Provisioning complete");
+            break;
+        default:
+            break;
+    }
+}
+
+void drawProvisioningScreen(const char *status) {
+    display.fillScreen(C_BG);
+
+    display.setTextColor(C_CLAUDE_BRAND);
+    display.setTextSize(2);
+    display.setCursor(8, 4);
+    display.print("WIFI SETUP");
+    display.fillRect(0, 24, LCD_HEIGHT, 1, C_DIVIDER);
+
+    display.setTextColor(C_DIM);
+    display.setTextSize(1);
+    display.setCursor(8, 28);
+    display.print("App: ESP BLE Provisioning");
+    display.setTextColor(C_FG);
+    display.setCursor(8, 38);
+    display.print("Device: " BLE_DEVICE_NAME);
+
+    display.fillRect(0, 50, LCD_HEIGHT, 1, C_DIVIDER);
+
+    display.setTextColor(C_DIM);
+    display.setTextSize(1);
+    int labelW = display.textWidth("ENTER PIN");
+    display.setCursor((LCD_HEIGHT - labelW) / 2, 54);
+    display.print("ENTER PIN");
+
+    display.setTextSize(4);
+    display.setTextColor(C_FG);
+    int pinW = display.textWidth(BLE_POP_PIN);
+    display.setCursor((LCD_HEIGHT - pinW) / 2, 64);
+    display.print(BLE_POP_PIN);
+
+    display.fillRect(0, 100, LCD_HEIGHT, 1, C_DIVIDER);
+
+    display.setTextColor(C_TOKENS);
+    display.setTextSize(1);
+    int sw = display.textWidth(status);
+    display.setCursor((LCD_HEIGHT - sw) / 2, 104);
+    display.print(status);
+
+    display.setTextColor(C_DIM);
+    display.setCursor(8, 120);
+    display.print("Hold BOOT at startup = reprovision");
+}
+
 // ── WiFi ──────────────────────────────────────────────────────────────────────
 bool connectWifi() {
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin();  // use provisioned credentials from NVS
 
     display.setCursor(10, 110);
     display.setTextColor(TFT_CYAN);
