@@ -1,0 +1,19 @@
+services:
+  ai-usage-tracker:
+    build: .
+    ports:
+      - "8030:8030"
+    environment:
+      # Required: your Claude OAuth access token
+      # Get it from ~/.claude/.credentials.json after running `claude login`
+      - CLAUDE_OAUTH_TOKEN=${CLAUDE_OAUTH_TOKEN}
+
+      # Optional: path to OpenClaw agents dir for Codex session usage
+      # Leave unset if you don't use OpenClaw/Codex
+      # - CODEX_TRAJECTORY_DIR=/data/agents
+
+    # Uncomment to mount your agents dir for Codex usage (adjust path)
+    # volumes:
+    #   - ~/.openclaw/agents:/data/agents:ro
+
+    restart: unless-stopped

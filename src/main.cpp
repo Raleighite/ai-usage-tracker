@@ -11,6 +11,8 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <WiFiProv.h>
+#include <Preferences.h>
+#include <WebServer.h>
 #include <LovyanGFX.hpp>
 #include "config.h"
 
@@ -116,6 +118,13 @@ RTC_DATA_ATTR int bootCount = 0;
 static volatile bool g_wifiReady = false;
 static volatile bool g_provError = false;
 
+// Dynamic server config (loaded from NVS on boot, set via config portal)
+static char g_serverHost[64]  = SERVER_HOST;
+static int  g_serverPort      = SERVER_PORT;
+static char g_usageUrl[128]   = {};
+static char g_claudeUrl[128]  = {};
+static char g_codexUrl[128]   = {};
+
 // ── Forward declarations ──────────────────────────────────────────────────────
 bool     connectWifi();
 bool     fetchUsage(UsageData &out);
@@ -137,6 +146,11 @@ uint32_t costColor(float cost);
 bool     checkManualRefresh();  // long-press IO0 restarts the device
 void     drawProvisioningScreen(const char *status = "Advertising over BLE...");
 void     SysProvEvent(arduino_event_t *sys_event);
+void     loadServerConfig();
+void     saveServerConfig(const char *host, int port);
+bool     isServerConfigured();
+void     drawConfigPortalScreen(const char *ip, int secsLeft);
+void     startConfigPortal();
 
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
@@ -159,7 +173,10 @@ void setup() {
     // Hold BOOT button during boot = force re-provisioning (clears saved WiFi creds)
     pinMode(PIN_BTN1, INPUT_PULLUP);
     bool forceReprovision = (digitalRead(PIN_BTN1) == LOW);
-    if (forceReprovision) Serial.println("[prov] BOOT held — re-provisioning");
+    if (forceReprovision) {
+        Serial.println("[prov] BOOT held — re-provisioning");
+        Preferences p; p.begin("srv_cfg", false); p.clear(); p.end();
+    }
 
     // Start BLE provisioning (non-blocking).
     // Already provisioned: connects silently in <3s.
@@ -196,6 +213,9 @@ void setup() {
             delay(800);
         }
     }
+    delay(500);  // let BT memory cleanup settle
+    loadServerConfig();
+    if (!isServerConfigured()) startConfigPortal();
 }
 
 void loop() {
@@ -300,6 +320,145 @@ void drawProvisioningScreen(const char *status) {
     display.print("Hold BOOT at startup = reprovision");
 }
 
+// ── Server config (NVS + HTTP config portal) ───────────────────────────────
+void loadServerConfig() {
+    Preferences prefs;
+    prefs.begin("srv_cfg", true);
+    String host = prefs.getString("host", SERVER_HOST);
+    int    port = prefs.getInt("port", SERVER_PORT);
+    prefs.end();
+    strlcpy(g_serverHost, host.c_str(), sizeof(g_serverHost));
+    g_serverPort = port;
+    snprintf(g_usageUrl,  sizeof(g_usageUrl),  "http://%s:%d/api/usage/summary", g_serverHost, g_serverPort);
+    snprintf(g_claudeUrl, sizeof(g_claudeUrl), "http://%s:%d/api/claude/usage",  g_serverHost, g_serverPort);
+    snprintf(g_codexUrl,  sizeof(g_codexUrl),  "http://%s:%d/api/codex/usage",   g_serverHost, g_serverPort);
+    Serial.printf("[cfg] server: %s:%d\n", g_serverHost, g_serverPort);
+}
+
+void saveServerConfig(const char *host, int port) {
+    Preferences prefs;
+    prefs.begin("srv_cfg", false);
+    prefs.putString("host", host);
+    prefs.putInt("port", port);
+    prefs.putBool("ok", true);
+    prefs.end();
+    Serial.printf("[cfg] saved server: %s:%d\n", host, port);
+}
+
+bool isServerConfigured() {
+    Preferences prefs;
+    prefs.begin("srv_cfg", true);
+    bool val = prefs.getBool("ok", false);
+    prefs.end();
+    return val;
+}
+
+void drawConfigPortalScreen(const char *ip, int secsLeft) {
+    display.fillScreen(C_BG);
+    display.setTextColor(C_CLAUDE_BRAND);
+    display.setTextSize(2);
+    display.setCursor(8, 4);
+    display.print("SERVER SETUP");
+    display.fillRect(0, 24, LCD_HEIGHT, 1, C_DIVIDER);
+
+    display.setTextColor(C_DIM);
+    display.setTextSize(1);
+    display.setCursor(8, 28);
+    display.print("Open in browser:");
+
+    char urlStr[32];
+    snprintf(urlStr, sizeof(urlStr), "http://%s", ip);
+    display.setTextColor(C_FG);
+    display.setTextSize(1);
+    int urlW = display.textWidth(urlStr);
+    display.setCursor((LCD_HEIGHT - urlW) / 2, 40);
+    display.print(urlStr);
+
+    display.fillRect(0, 54, LCD_HEIGHT, 1, C_DIVIDER);
+
+    display.setTextColor(C_DIM);
+    display.setTextSize(1);
+    display.setCursor(8, 58);
+    display.print("Set server host + port,");
+    display.setCursor(8, 68);
+    display.print("then click Save.");
+
+    display.fillRect(0, 82, LCD_HEIGHT, 1, C_DIVIDER);
+
+    display.setTextColor(C_DIM);
+    display.setCursor(8, 86);
+    display.print("Default:");
+    char defStr[48];
+    snprintf(defStr, sizeof(defStr), "%s:%d", g_serverHost, g_serverPort);
+    display.setTextColor(C_TOKENS);
+    display.setCursor(8, 96);
+    display.print(defStr);
+
+    char countdown[20];
+    snprintf(countdown, sizeof(countdown), "Closes in %ds", secsLeft);
+    display.setTextColor(C_DIM);
+    display.setCursor(8, 118);
+    display.print(countdown);
+}
+
+void startConfigPortal() {
+    WebServer srv(80);
+    bool configured = false;
+    String ip = WiFi.localIP().toString();
+    drawConfigPortalScreen(ip.c_str(), 60);
+
+    srv.on("/", HTTP_GET, [&]() {
+        String page = "<!DOCTYPE html><html><head><title>AI Tracker Setup</title>"
+            "<style>body{font-family:sans-serif;max-width:400px;margin:40px auto;padding:20px;}"
+            "label{display:block;margin-top:12px;font-size:14px;color:#888;}"
+            "input{width:100%;padding:8px;margin:4px 0;box-sizing:border-box;font-size:16px;}"
+            "button{background:#E5541B;color:#fff;border:none;padding:12px;width:100%;"
+            "font-size:16px;margin-top:16px;cursor:pointer;}"
+            "</style></head><body>"
+            "<h2>&#9889; AI Usage Tracker</h2>"
+            "<p>Enter your backend server address, then click Save.</p>"
+            "<form method='POST' action='/save'>"
+            "<label>Server Host (IP or hostname)</label>"
+            "<input name='host' value='" + String(g_serverHost) + "' placeholder='192.168.0.203'>"
+            "<label>Server Port</label>"
+            "<input name='port' value='" + String(g_serverPort) + "' placeholder='8030'>"
+            "<button type='submit'>Save &amp; Restart</button>"
+            "</form></body></html>";
+        srv.send(200, "text/html", page);
+    });
+
+    srv.on("/save", HTTP_POST, [&]() {
+        String host = srv.arg("host");
+        int    port = srv.arg("port").toInt();
+        if (host.length() > 0 && port > 0 && port < 65536) {
+            saveServerConfig(host.c_str(), port);
+            srv.send(200, "text/html",
+                "<!DOCTYPE html><html><body style='font-family:sans-serif;max-width:400px;"
+                "margin:40px auto;padding:20px;'>"
+                "<h2>&#9989; Saved!</h2><p>Device is restarting...</p></body></html>");
+            configured = true;
+        } else {
+            srv.send(400, "text/plain", "Invalid host or port");
+        }
+    });
+
+    srv.begin();
+    uint32_t deadline = millis() + 60000;
+    int lastSec = 60;
+    while (!configured && millis() < deadline) {
+        srv.handleClient();
+        int secsLeft = (int)((deadline - millis()) / 1000);
+        if (secsLeft != lastSec) {
+            lastSec = secsLeft;
+            drawConfigPortalScreen(ip.c_str(), secsLeft);
+        }
+        delay(10);
+    }
+    srv.stop();
+    if (configured) { delay(1200); ESP.restart(); }
+    // Timeout: proceed with defaults
+}
+
 // ── WiFi ──────────────────────────────────────────────────────────────────────
 bool connectWifi() {
     WiFi.mode(WIFI_STA);
@@ -327,7 +486,7 @@ bool connectWifi() {
 // ── HTTP fetch + JSON parse ───────────────────────────────────────────────────
 bool fetchUsage(UsageData &out) {
     HTTPClient http;
-    http.begin(USAGE_URL);
+    http.begin(g_usageUrl);
     http.setTimeout(8000);
 
     int code = http.GET();
@@ -636,7 +795,7 @@ static void printClaudeCentered(int y, const char *str) {
 
 bool fetchClaudeUsage(ClaudeUsage &out) {
     HTTPClient http;
-    http.begin(CLAUDE_USAGE_URL);
+    http.begin(g_claudeUrl);
     http.setTimeout(5000);
     int code = http.GET();
     if (code != 200) {
@@ -751,7 +910,7 @@ void holdClaudeScreen() {
 // ── Codex local session usage: fetch + display ───────────────────────────────
 bool fetchCodexUsage(CodexUsage &out) {
     HTTPClient http;
-    http.begin(CODEX_USAGE_URL);
+    http.begin(g_codexUrl);
     http.setTimeout(5000);
     int code = http.GET();
     if (code != 200) {
