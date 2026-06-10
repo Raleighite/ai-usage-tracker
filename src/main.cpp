@@ -813,28 +813,34 @@ void drawStatusScreen(const ClaudeUsage &claude, const CodexUsage &codex) {
     if (!showCodex) {
         drawCountdownLine(100, "CLAUDE RESET", claude.session_resets_in);
     } else {
+        // Codex reset (upper row)
         if (!codex.valid) {
             display.setTextSize(1);
             display.setTextColor(C_COST_ALERT);
-            printClaudeCentered(96, "codex endpoint unavailable");
+            printClaudeCentered(94, "codex endpoint unavailable");
         } else {
-            drawCountdownLine(96, "CODEX RESET", codex.session_resets_in);
-            drawMiniCodexContext(codex);
+            drawCountdownLine(94, "CODEX RESET", codex.session_resets_in);
         }
+
+        // Divider separating the two countdowns
+        display.fillRect(8, 113, LCD_HEIGHT - 16, 1, C_DIVIDER);
+
+        // Claude/Sonnet reset — label left (dim, size 1), value right (bright, size 2)
+        const char *claudeLabel = sonnetWeeklyMaxed ? "SONNET RESET" : "CLAUDE RESET";
+        const char *claudeReset = sonnetWeeklyMaxed
+            ? (claude.sonnet_weekly_resets_in[0] ? claude.sonnet_weekly_resets_in : "--")
+            : (claude.session_resets_in[0] ? claude.session_resets_in : "--");
 
         display.setTextSize(1);
         display.setTextColor(C_DIM);
-        if (sonnetWeeklyMaxed) {
-            char line[42];
-            snprintf(line, sizeof(line), "SONNET RESET %s",
-                     claude.sonnet_weekly_resets_in[0] ? claude.sonnet_weekly_resets_in : "--");
-            printClaudeCentered(128, line);
-        } else {
-            char line[42];
-            snprintf(line, sizeof(line), "CLAUDE RESET %s",
-                     claude.session_resets_in[0] ? claude.session_resets_in : "--");
-            printClaudeCentered(128, line);
-        }
+        display.setCursor(8, 117);
+        display.print(claudeLabel);
+
+        display.setTextSize(2);
+        display.setTextColor(C_CLAUDE_BRAND);
+        int valW = display.textWidth(claudeReset);
+        display.setCursor(LCD_HEIGHT - 8 - valW, 114);
+        display.print(claudeReset);
     }
 }
 
