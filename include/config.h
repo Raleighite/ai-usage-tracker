@@ -32,9 +32,14 @@
 #define COST_ALERT      5.00f   // red    >= $5.00
 
 // ── Display timing ───────────────────────────────────────────────────
-#define CLAUDE_DWELL_MS 30000   // time on Claude quota screen (30s)
-#define CODEX_DWELL_MS  15000   // time on Codex usage screen (15s)
+#define STATUS_DWELL_MS 30000   // time on selected status screen (30s)
+#define CLAUDE_DWELL_MS STATUS_DWELL_MS
+#define CODEX_DWELL_MS  STATUS_DWELL_MS
 #define ERROR_RETRY_MS   5000   // retry delay after fetch/WiFi errors
+
+// Optional fallback if /api/codex/usage does not expose codex5h_pct yet.
+// Keep 0 to avoid pretending token counts are a real quota percentage.
+#define CODEX_SESSION_TOKEN_BUDGET 0
 
 // ── Color palette (RGB888, LovyanGFX converts internally) ───────────────────
 #define C_BG            0x080808  // near-black background

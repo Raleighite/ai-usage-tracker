@@ -84,6 +84,8 @@ struct ClaudeUsage {
 };
 
 struct CodexUsage {
+    int  session_pct  = -1;  // -1 = unavailable
+    char session_resets_in[12] = {};
     int  turns_5h     = 0;
     int  sessions_5h  = 0;
     int  tokens_5h    = 0;
@@ -125,6 +127,7 @@ void     drawClaudeScreen(const ClaudeUsage &c);
 void     holdClaudeScreen();
 bool     fetchCodexUsage(CodexUsage &out);
 void     drawCodexScreen(const CodexUsage &c);
+void     drawStatusScreen(const ClaudeUsage &claude, const CodexUsage &codex);
 void     drawError(const char *msg);
 float    readBatteryPct();
 uint32_t costColor(float cost);
@@ -178,9 +181,7 @@ void loop() {
 
     CodexUsage codex;
     if (!fetchCodexUsage(codex)) {
-        drawError("Codex failed");
-        delay(ERROR_RETRY_MS);
-        return;
+        Serial.println("[codex] unavailable; status screen will fall back if needed");
     }
 
     runDisplayLoop(claude, codex);
@@ -491,28 +492,14 @@ void drawTierScreen(const char *name, const TierStats &t, uint32_t color,
     printCentered(0, LCD_HEIGHT, 125, "hold IO14 to advance");
 }
 
-// ── Display loop: Claude quota, then Codex usage. No spend/cost screens. ────
+// ── Display loop: one focused quota screen. No dense/cycling data screens. ──
 void runDisplayLoop(const ClaudeUsage &claude, const CodexUsage &codex) {
     pinMode(PIN_BTN1, INPUT_PULLUP);  // IO0 — has internal pullup
     pinMode(PIN_BTN2, INPUT);          // GPIO35 — input-only, external pullup on PCB
 
-    drawClaudeScreen(claude);
-    uint32_t claudeStart = millis();
-    while (millis() - claudeStart < CLAUDE_DWELL_MS) {
-        if (digitalRead(PIN_BTN1) == LOW) {
-            uint32_t held = millis();
-            while (digitalRead(PIN_BTN1) == LOW) {
-                if (millis() - held > 2000) { ESP.restart(); }
-                delay(50);
-            }
-        }
-        if (digitalRead(PIN_BTN2) == LOW) { delay(200); break; }
-        delay(50);
-    }
-
-    drawCodexScreen(codex);
-    uint32_t codexStart = millis();
-    while (millis() - codexStart < CODEX_DWELL_MS) {
+    drawStatusScreen(claude, codex);
+    uint32_t screenStart = millis();
+    while (millis() - screenStart < STATUS_DWELL_MS) {
         if (digitalRead(PIN_BTN1) == LOW) {
             uint32_t held = millis();
             while (digitalRead(PIN_BTN1) == LOW) {
@@ -667,6 +654,12 @@ bool fetchCodexUsage(CodexUsage &out) {
         return false;
     }
 
+    out.session_pct = doc["codex5h_pct"] | (doc["codex_session_pct"] | (doc["session_pct"] | -1));
+    const char *resetText = doc["codex5h_resets_in"] |
+                            (doc["codex_session_resets_in"] |
+                             (doc["session_resets_in"] | (doc["resets_in"] | "")));
+    strlcpy(out.session_resets_in, resetText, sizeof(out.session_resets_in));
+
     out.turns_5h     = doc["codex5h_turns"]     | 0;
     out.sessions_5h  = doc["codex5h_sessions"]  | 0;
     out.tokens_5h    = doc["codex5h_tokens"]    | 0;
@@ -676,9 +669,15 @@ bool fetchCodexUsage(CodexUsage &out) {
     out.turns_7d     = doc["codex7d_turns"]     | 0;
     out.sessions_7d  = doc["codex7d_sessions"]  | 0;
     out.tokens_7d    = doc["codex7d_tokens"]    | 0;
+#if CODEX_SESSION_TOKEN_BUDGET > 0
+    if (out.session_pct < 0) {
+        out.session_pct = constrain((int)(out.tokens_5h * 100.0f / CODEX_SESSION_TOKEN_BUDGET), 0, 100);
+    }
+#endif
     out.valid        = true;
 
-    Serial.printf("[codex] 5h=%d turns/%d sessions/%d tokens 24h=%d/%d/%d 7d=%d/%d/%d\n",
+    Serial.printf("[codex] session=%d%% reset=%s 5h=%d turns/%d sessions/%d tokens 24h=%d/%d/%d 7d=%d/%d/%d\n",
+                  out.session_pct, out.session_resets_in,
                   out.turns_5h, out.sessions_5h, out.tokens_5h,
                   out.turns_24h, out.sessions_24h, out.tokens_24h,
                   out.turns_7d, out.sessions_7d, out.tokens_7d);
@@ -739,6 +738,104 @@ void drawCodexScreen(const CodexUsage &c) {
     drawCodexRow(4,  "CODEX 5H",  c.turns_5h,  c.sessions_5h,  c.tokens_5h,  maxTokens);
     drawCodexRow(48, "CODEX 24H", c.turns_24h, c.sessions_24h, c.tokens_24h, maxTokens);
     drawCodexRow(92, "CODEX 7D",  c.turns_7d,  c.sessions_7d,  c.tokens_7d,  maxTokens);
+}
+
+static bool quotaMaxed(int pct) {
+    return pct >= 100;
+}
+
+static void drawLargeQuotaBar(int pct, uint32_t color) {
+    const int x = 10;
+    const int y = 68;
+    const int w = LCD_HEIGHT - 20;
+    const int h = 22;
+
+    display.drawRect(x - 1, y - 1, w + 2, h + 2, C_DIVIDER);
+    display.fillRect(x, y, w, h, C_GAUGE_BG);
+    int fill = pct >= 0 ? (int)(w * constrain(pct, 0, 100) / 100.0f) : 0;
+    if (fill > 0) display.fillRect(x, y, fill, h, color);
+}
+
+static void drawCountdownLine(int y, const char *label, const char *resetText) {
+    const char *reset = resetText && resetText[0] ? resetText : "--";
+    char line[42];
+    snprintf(line, sizeof(line), "%s %s", label, reset);
+    display.setTextSize(2);
+    display.setTextColor(C_FG);
+    printClaudeCentered(y, line);
+}
+
+static void drawMiniCodexContext(const CodexUsage &codex) {
+    char tokenStr[12];
+    char meta[36];
+    formatTokenCount(codex.tokens_5h, tokenStr, sizeof(tokenStr));
+    snprintf(meta, sizeof(meta), "%s tok  %dt %ds", tokenStr, codex.turns_5h, codex.sessions_5h);
+    display.setTextSize(1);
+    display.setTextColor(C_DIM);
+    printClaudeCentered(118, meta);
+}
+
+void drawStatusScreen(const ClaudeUsage &claude, const CodexUsage &codex) {
+    display.fillScreen(C_BG);
+
+    if (!claude.valid) {
+        display.setTextColor(TFT_RED);
+        display.setTextSize(2);
+        printClaudeCentered(54, "CLAUDE OFFLINE");
+        display.setTextColor(C_DIM);
+        display.setTextSize(1);
+        printClaudeCentered(85, "usage endpoint unavailable");
+        return;
+    }
+
+    bool sonnetWeeklyMaxed = quotaMaxed(claude.sonnet_weekly_pct);
+    bool claudeSessionMaxed = quotaMaxed(claude.session_pct);
+    bool showCodex = sonnetWeeklyMaxed || claudeSessionMaxed;
+
+    const char *title = showCodex ? "CODEX SESSION" : "CLAUDE SESSION";
+    int pct = showCodex ? codex.session_pct : claude.session_pct;
+    uint32_t color = showCodex ? C_CODEX_BRAND : quotaColor(pct);
+
+    display.setTextSize(2);
+    display.setTextColor(color);
+    display.setCursor(8, 6);
+    display.print(title);
+
+    char pctStr[10];
+    if (pct >= 0) snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+    else strlcpy(pctStr, "--", sizeof(pctStr));
+    display.setTextSize(4);
+    display.setTextColor(C_FG);
+    printClaudeCentered(30, pctStr);
+
+    drawLargeQuotaBar(pct, color);
+
+    if (!showCodex) {
+        drawCountdownLine(100, "CLAUDE RESET", claude.session_resets_in);
+    } else {
+        if (!codex.valid) {
+            display.setTextSize(1);
+            display.setTextColor(C_COST_ALERT);
+            printClaudeCentered(96, "codex endpoint unavailable");
+        } else {
+            drawCountdownLine(96, "CODEX RESET", codex.session_resets_in);
+            drawMiniCodexContext(codex);
+        }
+
+        display.setTextSize(1);
+        display.setTextColor(C_DIM);
+        if (sonnetWeeklyMaxed) {
+            char line[42];
+            snprintf(line, sizeof(line), "SONNET RESET %s",
+                     claude.sonnet_weekly_resets_in[0] ? claude.sonnet_weekly_resets_in : "--");
+            printClaudeCentered(128, line);
+        } else {
+            char line[42];
+            snprintf(line, sizeof(line), "CLAUDE RESET %s",
+                     claude.session_resets_in[0] ? claude.session_resets_in : "--");
+            printClaudeCentered(128, line);
+        }
+    }
 }
 
 void drawError(const char *msg) {
