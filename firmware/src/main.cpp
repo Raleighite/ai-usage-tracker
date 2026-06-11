@@ -148,6 +148,12 @@ void     drawError(const char *msg);
 float    readBatteryPct();
 uint32_t costColor(float cost);
 bool     checkManualRefresh();  // long-press IO0 restarts the device
+// Static helpers forward-declared so view-draw functions can call them
+// regardless of definition order in this file.
+static void     printClaudeCentered(int y, const char *str);
+static uint32_t quotaColor(int pct);
+static void     drawLargeQuotaBar(int pct, uint32_t color);
+static void     drawCountdownLine(int y, const char *label, const char *resetText);
 void     drawProvisioningScreen(const char *status = "Advertising over BLE...");
 void     SysProvEvent(arduino_event_t *sys_event);
 void     loadServerConfig();
