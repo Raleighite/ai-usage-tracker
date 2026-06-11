@@ -140,6 +140,10 @@ void     holdClaudeScreen();
 bool     fetchCodexUsage(CodexUsage &out);
 void     drawCodexScreen(const CodexUsage &c);
 void     drawStatusScreen(const ClaudeUsage &claude, const CodexUsage &codex);
+void     drawClaudeSessionView(const ClaudeUsage &c);
+void     drawCodexSessionView(const CodexUsage &c);
+void     drawSonnetWeeklyView(const ClaudeUsage &c);
+void     drawClaudeWeeklyView(const ClaudeUsage &c);
 void     drawError(const char *msg);
 float    readBatteryPct();
 uint32_t costColor(float cost);
@@ -764,14 +768,119 @@ void drawTierScreen(const char *name, const TierStats &t, uint32_t color,
     printCentered(0, LCD_HEIGHT, 125, "hold IO14 to advance");
 }
 
-// ── Display loop: one focused quota screen. No dense/cycling data screens. ──
-void runDisplayLoop(const ClaudeUsage &claude, const CodexUsage &codex) {
-    pinMode(PIN_BTN1, INPUT_PULLUP);  // IO0 — has internal pullup
-    pinMode(PIN_BTN2, INPUT);          // GPIO35 — input-only, external pullup on PCB
+// ── View mode indicator: small label at top-right corner ────────────────────
+static const char *VIEW_LABELS[] = {
+    "AUTO", "CLAUDE5H", "CODEX5H", "SONNET7D", "TOTAL7D"
+};
 
-    drawStatusScreen(claude, codex);
+static void drawViewIndicator(DisplayView view) {
+    const char *lbl = VIEW_LABELS[(int)view];
+    display.setTextSize(1);
+    display.setTextColor(view == VIEW_AUTO ? C_DIM : C_TOKENS);
+    int lblW = display.textWidth(lbl);
+    display.fillRect(LCD_HEIGHT - lblW - 5, 0, lblW + 4, 10, C_BG);
+    display.setCursor(LCD_HEIGHT - lblW - 3, 1);
+    display.print(lbl);
+}
+
+// ── Single focused metric: big % + progress bar + reset countdown ─────────────
+static void drawFocusedMetric(const char *title, int pct, uint32_t color,
+                               const char *resetLabel, const char *resetTime) {
+    display.setTextSize(2);
+    display.setTextColor(color);
+    display.setCursor(8, 6);
+    display.print(title);
+
+    char pctStr[10];
+    if (pct >= 0) snprintf(pctStr, sizeof(pctStr), "%d%%", pct);
+    else          strlcpy(pctStr, "--", sizeof(pctStr));
+    display.setTextSize(4);
+    display.setTextColor(C_FG);
+    printClaudeCentered(30, pctStr);
+
+    drawLargeQuotaBar(pct, color);
+    drawCountdownLine(100, resetLabel, resetTime);
+}
+
+// ── Per-view draw functions ───────────────────────────────────────────────────
+void drawClaudeSessionView(const ClaudeUsage &c) {
+    display.fillScreen(C_BG);
+    if (!c.valid) {
+        display.setTextColor(TFT_RED); display.setTextSize(2);
+        printClaudeCentered(54, "CLAUDE OFFLINE"); return;
+    }
+    drawFocusedMetric("CLAUDE SESSION",
+                      c.session_pct, quotaColor(c.session_pct),
+                      "RESET", c.session_resets_in);
+}
+
+void drawCodexSessionView(const CodexUsage &c) {
+    display.fillScreen(C_BG);
+    if (!c.valid) {
+        display.setTextColor(TFT_RED); display.setTextSize(2);
+        printClaudeCentered(54, "CODEX OFFLINE");
+        display.setTextColor(C_DIM); display.setTextSize(1);
+        printClaudeCentered(85, "codex-usage-server offline"); return;
+    }
+    drawFocusedMetric("CODEX SESSION",
+                      c.session_pct, C_CODEX_BRAND,
+                      "RESET", c.session_resets_in);
+}
+
+void drawSonnetWeeklyView(const ClaudeUsage &c) {
+    display.fillScreen(C_BG);
+    if (!c.valid) {
+        display.setTextColor(TFT_RED); display.setTextSize(2);
+        printClaudeCentered(54, "CLAUDE OFFLINE"); return;
+    }
+    drawFocusedMetric("SONNET 7D",
+                      c.sonnet_weekly_pct, quotaColor(c.sonnet_weekly_pct),
+                      "RESET", c.sonnet_weekly_resets_in);
+}
+
+void drawClaudeWeeklyView(const ClaudeUsage &c) {
+    display.fillScreen(C_BG);
+    if (!c.valid) {
+        display.setTextColor(TFT_RED); display.setTextSize(2);
+        printClaudeCentered(54, "CLAUDE OFFLINE"); return;
+    }
+    drawFocusedMetric("TOTAL 7D",
+                      c.total_weekly_pct, quotaColor(c.total_weekly_pct),
+                      "RESET", c.total_weekly_resets_in);
+}
+
+// ── Display loop: smart auto-screen + BTN2 manual view cycling ────────────────
+//
+// BTN2 (GPIO35) short press → cycles: Claude 5h → Codex 5h → Sonnet 7d →
+//   Total 7d → wraps back to Claude 5h.
+// AUTO mode restores after MANUAL_VIEW_TIMEOUT_MS of inactivity.
+// BTN1 (IO0) long-press (2s) → hard restart.
+void runDisplayLoop(const ClaudeUsage &claude, const CodexUsage &codex) {
+    static DisplayView currentView = VIEW_AUTO;
+    static uint32_t    lastInputMs = 0;
+
+    pinMode(PIN_BTN1, INPUT_PULLUP);  // IO0  — internal pullup
+    pinMode(PIN_BTN2, INPUT);          // GPIO35 — input-only
+
+    // Return to AUTO after inactivity timeout
+    if (currentView != VIEW_AUTO && millis() - lastInputMs > MANUAL_VIEW_TIMEOUT_MS) {
+        currentView = VIEW_AUTO;
+    }
+
+    // Draw selected view
+    switch (currentView) {
+        case VIEW_CLAUDE_SESSION: drawClaudeSessionView(claude); break;
+        case VIEW_CODEX_SESSION:  drawCodexSessionView(codex);  break;
+        case VIEW_SONNET_WEEKLY:  drawSonnetWeeklyView(claude); break;
+        case VIEW_CLAUDE_WEEKLY:  drawClaudeWeeklyView(claude); break;
+        default:                  drawStatusScreen(claude, codex); break;
+    }
+    drawViewIndicator(currentView);
+
+    // Button dwell loop
     uint32_t screenStart = millis();
     while (millis() - screenStart < STATUS_DWELL_MS) {
+        // BTN1 (IO0): long-press 2s → restart
         if (digitalRead(PIN_BTN1) == LOW) {
             uint32_t held = millis();
             while (digitalRead(PIN_BTN1) == LOW) {
@@ -779,11 +888,22 @@ void runDisplayLoop(const ClaudeUsage &claude, const CodexUsage &codex) {
                 delay(50);
             }
         }
-        if (digitalRead(PIN_BTN2) == LOW) { delay(200); break; }
+
+        // BTN2 (GPIO35): short press → advance to next manual view
+        if (digitalRead(PIN_BTN2) == LOW) {
+            delay(50);                                   // debounce
+            while (digitalRead(PIN_BTN2) == LOW) delay(20);  // wait for release
+            lastInputMs = millis();
+            if (currentView == VIEW_AUTO || (int)currentView >= VIEW_COUNT - 1) {
+                currentView = VIEW_CLAUDE_SESSION;
+            } else {
+                currentView = (DisplayView)((int)currentView + 1);
+            }
+            break;  // redraw immediately with new view
+        }
         delay(50);
     }
-
-    // Next loop refreshes all endpoints and draws the updated values.
+    // loop() will re-fetch data and call runDisplayLoop() again
 }
 
 // ── Claude subscription usage: fetch + display ─────────────────────────────────
