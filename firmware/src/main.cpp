@@ -113,6 +113,19 @@ struct UsageData {
     bool      valid           = false;
 };
 
+// ── Display view enum ────────────────────────────────────────────────────────
+// BTN2 press cycles 1→4; AUTO restores after MANUAL_VIEW_TIMEOUT_MS inactivity
+enum DisplayView {
+    VIEW_AUTO           = 0,  // Smart: auto-picks most relevant screen
+    VIEW_CLAUDE_SESSION = 1,  // Claude 5h session %
+    VIEW_CODEX_SESSION  = 2,  // Codex 5h session %
+    VIEW_SONNET_WEEKLY  = 3,  // Claude Sonnet 7d %
+    VIEW_CLAUDE_WEEKLY  = 4,  // Claude total 7d %
+    VIEW_COUNT          = 5
+};
+
+#define MANUAL_VIEW_TIMEOUT_MS  30000   // return to AUTO after 30s without input
+
 // ── Persistent across restarts ────────────────────────────────────────────────
 RTC_DATA_ATTR int bootCount = 0;
 static volatile bool g_wifiReady = false;
